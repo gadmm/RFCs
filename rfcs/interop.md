@@ -1,3 +1,68 @@
+# Towards better systems programming in OCaml with out-of-heap allocation
+
+The current multicore OCaml implementation bans so-called “naked
+pointers”, pointers to outside the OCaml heap unless they follow
+drastic restrictions. A backwards-incompatible change has been
+proposed to make way for the new multicore GC in OCaml. I argue that
+out-of-heap pointers are not an anomaly, but are part of a better
+systems programming future, and I propose to show that the address
+space reservation technique makes them compatible with the multicore
+GC.
+
+This is inspired by @jhjourdan's experiment with a contiguous address
+space at <https://github.com/ocaml/ocaml/issues/6101>. Seven years
+later, reserving address space to efficiently recognise in-heap
+pointers (and do even wilder tricks) is standard in garbage collected
+languages and allocators, and in research about memory management. In
+addition, allowing foreign pointers for interoperability is a standard
+feature in common systems programming languages.
+
+As part of my research to make OCaml a better systems programming
+language, I am planning to revisit this approach. I am joined in this
+exploration by @rmdouglas, who worked in the industry on a project
+which involved Ancient-like allocation for a shared heap in OCaml and
+who is interested in this project. I explain the current plan below, I
+would be very thankful if we could get some feedback before we dig
+further.
+
+This particular project is recent, although I have been interested in
+off-heap allocation for a while as part of my research. Indeed, I had
+the occasion to ask a few OCaml devs a few months ago, who gave some
+reasons as to why the contiguous heap approach would be bad (and so
+why it was abandoned, I understood). But when reading @kayceesrk's et
+al.'s “Retrofitting parallelism onto OCaml”
+(https://arxiv.org/abs/2004.11663) three weeks ago, I realised that
+this technique is already used by the concurrent collector for the
+minor heap–so it was hard to see which drawbacks there could remain in
+practice. This realisation motivated me to have a second look and
+learn all about this technique, and to investigate its supposed
+drawbacks by myself. I now believe that the drawbacks are few or
+non-existent, and I report some of my research below.
+
+This draft RFC (“Request for comments”) is comprised of two parts:
+
+- The proposal itself, of a path to keep supporting out-of-heap
+  pointers. The reason why I decided to take advantage of the RFC
+  repository is to offer a space for focused discussion with an
+  evolving document that takes feedback into account. It is rendered
+  here [TODO; currently next].
+
+- Motivations given below and structured as follows:
+  1. Gathered evidence from the practice and the literature
+  2. Interest of out-of-heap allocation in current and future OCaml
+  3. Dispelling common misconceptions about address space reservation
+
+In particular, please inform us about any elements that we might be
+missing and that have been used to justify the current
+"no-naked-pointers" approach, that are not currently available
+publicly.
+
+This is part of a project aiming originally for the longer term, but
+there is an obvious opportunity of _quickening the transition to
+multicore_ by avoiding the breaking changes brought by the removal of
+the page table, if we come to a conclusion on the proposed design
+early enough. So please help us determine where the bar is placed.
+
 # Efficient out-of-heap pointer detection
 
 To efficiently recognise in-heap from off-heap pointers, the broad
@@ -6,7 +71,7 @@ address spaces. The address space is reserved as needed, similarly to
 what is done in the Go language
 [(details)](https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L77-L99).
 
-The proposed implementation work is to demonstrate and implement aa
+The proposed implementation work is to demonstrate and implement an
 address space map for the non-multicore GC, starting from
 Jacques-Henri Jourdan's original approach of reserving a single
 contiguous virtual address space at
@@ -14,14 +79,15 @@ contiguous virtual address space at
 
 The criterion is that performance must be comparable to the
 no-naked-pointers mode and not have extravagant adverse effect. This
-is plausible thanks to the original experiment and the survey work.
+is plausible thanks to the companion survey work and the original
+experiment.
 
 In addition, I have identified 4 challenges which must be convincingly
 shown solvable to ensure that the result is both usable and scalable:
 
 1. the “growing heap” issue, whereby out-of-heap pointers become
-  in-heap after the heap grows,
-2. 32-bit support,
+   in-heap after the heap grows,
+2. 32-bit support & large memory support,
 3. the cost of synchronisation for multicore,
 4. malloc implementation for multicore.
 
@@ -101,7 +167,7 @@ Tainting is not exact (an address range can become reserved before an
 out-of-heap pointer is seen by the GC), but serves to enforce 2. in
 practice.
 
-## Challenge 2: 32-bit support
+## Challenge 2: 32-bit support & large memory support
 
 We aim to treat 32-bit and 64-bit similarly. With challenge 1 solved,
 we can do similarly to Go and reserve the address space progressively.
@@ -109,10 +175,29 @@ This also addresses the problem in 64-bit for machines with more than
 1TB of RAM, and offers the choice of virtual spaces smaller than 1TB
 if needed.
 
-We set a prefix size N ≥ 8, and use a 1-level or 2-level array of size
-2^N. For 64-bit this means virtual spaces ≤1TB (for N = 16 this is
-4GB, what the multicore GC reserves for the minor heap), and ≤16MB in
-32-bit.
+We set a prefix size N ≥ 8. The runtime can reserve up to 2^N virtual
+spaces, of size 2^L bytes (L=48-N in 64-bit and L=32-N in 32-bit),
+aligned at 2^L. For 64-bit this means virtual spaces ≤1TB (for N = 16
+this is 4GB, what the multicore GC reserves for the minor heap), and
+≤16MB in 32-bit. We use a global 1-level or 2-level array of size (at
+most) 2^N bytes as the address space map, so that finding the status
+of the virtual space a pointer belongs to is done efficiently by
+shifting and looking up in the array.
+
+We consider 3 possible states for each space in the address space map:
+Unknown, Reserved, Tainted. Thanks to the assumption 2. provided by
+the programmer and the decision to never give back address space to
+the OS, this state is monotonous: entries start with value Unknown and
+may become Reserved or Tainted at some point, and no longer change.
+
+When a major allocation requires to reserve additional contiguous
+address spaces, such a reservation (aligned at 2^L, of size a multiple
+of 2^L) is requested to the OS. A hint can be given as to where we
+would like it to start. The given mapping is checked against the
+address space map: none must be Tainted. In case of success, the
+corresponding virtual spaces are marked as Reserved in the map, and in
+case of failure then the rule 2. has been violated and the allocation
+fails.
 
 While not necessary to demonstrate our approach initially, many
 real-world lessons can be learnt from the detailed sources of the Go
@@ -120,9 +205,9 @@ allocator. In Go, the size is chosen to be 64MB or 4MB depending on
 the platform
 [(details)](https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L219-L231).
 Given the small sizes, special care is taken to reserve space as
-contiguously as possible. In 64-bit, one hints at a specific place in
-the middle of the address space unlikely to conflict with other
-mappings
+contiguously as possible to avoid fragmentation. In 64-bit, one hints
+at a specific place in the middle of the address space unlikely to
+conflict with other mappings
 [(details)](https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L489-L498).
 In 32-bit one asks to start as low as possible and tries to reserve a
 large chunk initially
@@ -133,17 +218,27 @@ concerning more platforms than supported by OCaml.
 
 ## Challenge 3: synchronisation
 
-Thanks to the rule 2. and the decision of never giving back address
-space to the OS, the address space map is monotonous: entries start
-with value Unknown and may become Reserved or Tainted at some point,
-and then no longer change.
+As we explained, when a query to the address space map gives Unknown,
+then we know we have an out-of-heap pointer, and we set it the entry
+to Tainted. Thus, tainting virtual spaces has a further interesting
+consequence: the value of the entry is permanently set to Reserved or
+Tainted as early as after the first query against the address space
+map. This gives a simple synchronisation strategy in multicore.
 
-Tainting virtual spaces containing known out-of-heap pointers has a
-further interesting consequence: any read to the virtual space table
-sets the value: if the query for some pointer reads Unknown, one can
-immediately set it to Tainted. Thus any synchronisation needs to
-happen at most once per entry and per domain, and does not need subtle
-tricks.
+We give each domain a local map that caches the global map. Then,
+following the same principle as before, each entry of the domain-local
+map becomes permanently set to Reserved or Tainted after the first
+query. If the first query yields Unknown in the local map, this time
+one synchronises with the global map. If it is Unknown in the global
+map, then it is permanently set to Tainted globally. Thus any
+synchronisation when querying the map needs to happen at most once per
+entry and per domain.
+
+Furthermore, when extending the reserved space during an allocation,
+one needs to be able to atomically compare and set several adjacent
+entries. One then can use a mutex, since it only competes with (other
+extensions of the reserved space and) queries of Unknown entries in
+the global table, which happen at most 2^N times globally.
 
 ## Challenge 4: malloc for multicore
 
@@ -154,71 +249,6 @@ For instance, jemalloc arenas can be customised to use the memory
 chunks one provides to it, e.g. carved out of the reserved address
 space
 ([arena.i.extent_hooks](http://jemalloc.net/jemalloc.3.html#arena.i.extent_hooks)).
-
-# Towards better systems programming in OCaml with out-of-heap allocation
-
-The current multicore OCaml implementation bans so-called “naked
-pointers”, pointers to outside the OCaml heap unless they follow
-drastic restrictions. A backwards-incompatible change has been
-proposed to make way for the new multicore GC in OCaml. I argue that
-out-of-heap pointers are not an anomaly, but are part of a better
-systems programming future, and I propose to show that the address
-space reservation technique makes them compatible with the multicore
-GC.
-
-This is inspired by @jhjourdan's experiment with a contiguous address
-space at <https://github.com/ocaml/ocaml/issues/6101>. Seven years
-later, reserving address space to efficiently recognise in-heap
-pointers (and do even wilder tricks) is standard in garbage collected
-languages and allocators, and in research about memory management. In
-addition, allowing foreign pointers for interoperability is a standard
-feature in common systems programming languages.
-
-As part of my research to make OCaml a better systems programming
-language, I am planning to revisit this approach. I am joined in this
-exploration by @rmdouglas, who worked in the industry on a project
-which involved Ancient-like allocation for a shared heap in OCaml and
-who is interested in this project. I explain the current plan below, I
-would be very thankful if we could get some feedback before we dig
-further.
-
-This particular project is recent, although I have been interested in
-off-heap allocation for a while as part of my research. Indeed, I had
-the occasion to ask a few OCaml devs a few months ago, who gave some
-reasons as to why the contiguous heap approach would be bad (and so
-why it was abandoned, I understood). But when reading @kayceesrk's et
-al.'s “Retrofitting parallelism onto OCaml”
-(https://arxiv.org/abs/2004.11663) three weeks ago, I realised that
-this technique is already used by the concurrent collector for the
-minor heap–so it was hard to see which drawbacks there could remain in
-practice. This realisation motivated me to have a second look and
-learn all about this technique, and to investigate its supposed
-drawbacks by myself. I now believe that the drawbacks are few or
-non-existent, and I report some of my research below.
-
-This draft RFC (“Request for comments”) is comprised of two parts:
-
-- The proposal itself, of a path to keep supporting out-of-heap
-  pointers. The reason why I decided to take advantage of the RFC
-  repository is to offer a space for focused discussion with an
-  evolving document that takes feedback into account. It is rendered
-  here [TODO; currently at the beginning of the file].
-
-- Motivations given below and structured as follows:
-  1. Gathered evidence from the practice and the literature
-  2. Interest of out-of-heap allocation in current and future OCaml
-  3. Dispelling common misconceptions about address space reservation
-
-In particular, please inform us about any elements that we might be
-missing and that have been used to justify the current
-"no-naked-pointers" approach, that are not currently available
-publicly.
-
-This is part of a project aiming originally for the longer term, but
-there is an obvious opportunity of _quickening the transition to
-multicore_ by avoiding the breaking changes brought by the removal of
-the page table, if we come to a conclusion on the proposed design
-early enough. So please help us determine where the bar is placed.
 
 ## Gathered evidence from the practice and the literature
 
@@ -337,13 +367,14 @@ in various ways:
 - With an indirection: use custom or abstract blocks.
 - Tag pointers: disguise pointers as integers by setting the lsb.
 
-In addition to explicitly breaking existing code, none of the
-propositions is ideal: in theory both have a linear overhead when
-traversing a structure compared to the same traversal using foreign
-pointers for instance, in which case the code adaptation that is
-required could be non-systematic. No empirical evaluation of the
-impact of the proposed changes has been proposed yet (but the opam
-switch associated with #9534 is a good first step to do such an
+In addition to explicitly breaking existing code, as we have seen in
+the case of foreign pointers, none of the propositions is ideal: in
+theory both have a linear overhead when traversing a structure
+compared to the same traversal using foreign pointers for instance, in
+which case the code adaptation that is required could be
+non-systematic. No empirical evaluation of the impact of the proposed
+changes has been proposed yet (but an opam switch associated with
+#9534 has recently appeared and will be a good tool to perform such an
 evaluation).
 
 In addition, the first solution incurs an allocation, whereas the
@@ -352,8 +383,9 @@ debuggers, static analysers and such, in ways that are unlikely to be
 fixable over time. Moreover, they do not bring additional safety in
 terms of resource-management: what they do is to deal in a rather
 radical manner with the problem of growing the heap while remembering
-who was outside (an issue that can also be solved by virtual
-addressing techniques).
+who was outside, which is mostly required by the reliance on the
+system malloc by the GC to request chunks of memory. This issue can
+also be solved by virtual addressing techniques.
 
 I asked @jberdine, who works at a large industrial OCaml user, if he
 had any migration concerns. I quote his reply with his permission (I
@@ -506,11 +538,11 @@ solution to allocate in the swap, since the tracing GC is unsuitable
 for operating on a disk: this is the original motivation of Ancient,
 written in a time when RAM was more limited.
 
-@ppedrot reported to me that in a recent experiment with Coq, by
-excluding some large, long-lived and rarely-accessed values from being
-scanned (using serialisation into bigarray rather than using ancient
-allocation), they saw an 8% performance improvement across the board
-in benchmarks.
+A recent experiment by @ppedrot with Coq to “hack a prototype on-disk
+offloading similar to ocaml-ancient”, implemented by mashalling to a
+file, saw a performance improvement of up to 12.3% in benchmarks
+(µ=3.4%, σ=2.9)
+(https://ci.inria.fr/coq/view/benchmarking/job/benchmark-part-of-the-branch/827/).
 
 ### Shared heaps
 
@@ -569,20 +601,26 @@ GC-allocated; a large ancient-allocated tree can be traversed with a
 zipper which uses the same principle as sharing to allocate only a
 small portion of it with the GC during traversal. This degree of
 interoperability, sharing and allocation polymorphism is not reachable
-using the suggested alternatives: indirections or tagged pointers, nor
-other known alternatives: marshalling, memory layouts (à la “kinds as
-calling conventions”, that would determine allocation method
-statically).
+using the suggested alternatives: indirections or tagged pointers; nor
+is it with other known alternatives: marshalling, or memory layouts
+that would determine the allocation method statically à la “kinds as
+calling conventions” (Eisenberg and Peyton Jones).
 
 In “Resource Polymorphism”, I proposed a high-level interpretation of
 this kind of interoperability between allocation methods, using an
 ownership and borrowing model inspired from a categorical semantics.
 In this model, the borrowing type operator (&) is interpreted as a
 functor from a kind of "Ownership" types to a kind of "GCed" types,
-that commutes with operations on types. The existence of such an
-operator depends on the existence of types of borrowed values that are
-agnostic regarding the allocation methods of each kind, and thus for
-which a _dynamic_ “in-heap?” check is a requirement.
+that commutes with operations on types. In simple terms, this means
+that one seeks to provide the same expressivity over borrowed values
+as we know over common GC-allocated types, manipulate them with the
+same functions, even if the borrowed value contains blocks allocated
+outside of the heap (as in the example of the ancient-allocated zipper
+mentioned above, that mixes blocks allocated with the GC and blocks
+allocated outside of the heap). The existence of such an operator
+depends on the existence of types of borrowed values that are agnostic
+regarding the allocation methods of each kind, and thus for which a
+_dynamic_ “in-heap?” check is a requirement.
 
 While this is some of the most forward-looking part of the
 resource-management proposal, this matches what can already be done
