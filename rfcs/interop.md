@@ -1,25 +1,28 @@
 # Efficient out-of-heap pointer detection
 
 To efficiently recognise in-heap from off-heap pointers, the broad
-idea is to offer a small "virtual page table" of very large address
-spaces.
+idea is to offer a small "virtual space table" of very large reserved
+address spaces. The address space is reserved as needed, similarly to
+what is done in the Go language
+(https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L77-L99).
 
 The proposed implementation work is to demonstrate and implement a
-virtual page table for the non-multicore GC, starting from
-@jhjourdan's original approach.
+virtual space table for the non-multicore GC, starting from
+@jhjourdan's original approach of reserving a single contiguous
+virtual address space.
 
 The criterion is that performance must be comparable to the
 no-naked-pointers mode and not have extravagant adverse effect. This
 is plausible thanks to the original experiment and the survey work.
 
 In addition, I have identified 4 challenges which must be convincingly
-shown solvable to ensure that the result is both usable and scalable.
+shown solvable to ensure that the result is both usable and scalable:
 
-- The “growing heap” issue, whereby out-of-heap pointers become
+- the “growing heap” issue, whereby out-of-heap pointers become
   in-heap after the heap grows,
 - 32-bit support,
-- The cost of synchronisation for multicore,
-- Malloc implementation for multicore.
+- the cost of synchronisation for multicore,
+- malloc implementation for multicore.
 
 ## Language reference
 
@@ -35,9 +38,9 @@ This is the only "normative" section of this proposal.
 The clause 1. preserves current behaviour. It is also important to
 note that non-aligned out-of-heap pointers and out-of-heap pointers to
 char are forbidden, or to explain to which extent they would be
-allowed inside OCaml values (and operated with primitives, for
-instance), due to the proliferation of reliance on the `0bxxxxxx10`
-bit pattern in the runtime to propagate exceptions.
+allowed inside OCaml values (and operated with external primitives,
+for instance), due to the proliferation of reliance on the
+`0bxxxxxx10` bit pattern in the runtime to propagate exceptions.
 
 The word of caution from the manual about out-of-heap pointers that
 become in-heap pointers after the _extension du domaine de la_
@@ -52,24 +55,37 @@ that solves the problem independently of the context.
 
 ## Challenge 1: the “growing heap” issue
 
+    “Doctor, it hurts when I do this...
+
+    — Then don't do it!”
+
+Current OCaml and OCaml multicore get memory chunks from the system
+allocator. Consequently, the risk that out-of-heap pointers integrate
+the heap after being freed is real. The GC will be confused and follow
+these out-of-heap pointers, leading to a crash.
+
 In practice, the “growing heap” issue is less of a problem than it
 sounds, at least when using address space reservation. One must be
-“very unlucky” if a full huge mappable address range becomes
-entirely available (unreserved) after some memory was allocated inside
-of it.
+“very unlucky” if a full huge mappable address range becomes entirely
+available (unreserved) after some memory was allocated inside of it,
+at a location close to where we choose to extend the address space
+next.
 
 To convert plausibility into certainty, the language designer can use
 a few tricks, such as asking the programmer, who knows more about the
-context, to provide this assumption for them. It appears that the
+context, to provide this assumption for them. It seems that the
 programmer can make a lot of deductions from the nature of the
-pointers they let inside the heap.
+pointers they let inside the heap and the inner workings of their
+system's malloc implementation (e.g.
+https://sourceware.org/glibc/wiki/MallocInternals).
 
 For instance, in the case of out-of-heap allocation for systems
 programming (ancient heap, shared heap, arena...), this is a complete
 non-issue even on 32-bit: one just needs to use the same standard
 address space reservation technique, and never give back virtual
 address space, so that it cannot overlap with any future assignments
-for OCaml's heap.
+for OCaml's heap. By courtesy, for symmetric reasons, we will avoid
+giving back reserved space to the OS.
 
 Also, the constraint 2. is trivially achieved in case one has 1TB of
 address space reserved up-front and never need to reserve more. To
@@ -79,7 +95,7 @@ user can select a fixed virtual address space size if needed (e.g. for
 
 Making 2. part of the norm further offers the possibility of detecting
 such errors: when one sees a out-of-heap pointer during marking, one
-can “taint” the corresponding virtual page, and fail on a future
+can “taint” the corresponding virtual space, and fail on a future
 address space reservation if one cannot obtain an untainted range.
 Tainting is not exact (an address range can become reserved before an
 out-of-heap pointer is seen by the GC), but serves to enforce 2. in
@@ -87,30 +103,47 @@ practice.
 
 ## Challenge 2: synchronisation
 
-Tainting virtual pages containing known out-of-heap pointers has
-another interesting consequence: any read to the virtual page table
-permanently determines the cached value of the entry: reserved or
-tainted. Thus any synchronisation needs to happen at most once per
-entry and per domain, and does not need subtle tricks.
+Thanks to the rule 2. and the decision of never giving back address
+space to the OS, the virtual space table is monotonous: entries start
+with value Unknown and may become Reserved or Tainted at some point,
+and then no longer change.
+
+Tainting virtual spaces containing known out-of-heap pointers has a
+further interesting consequence: any read to the virtual space table
+sets the value: if the query for some pointer reads Unknown, one can
+immediately set it to Tainted. Thus any synchronisation needs to
+happen at most once per entry and per domain, and does not need subtle
+tricks.
 
 ## Challenge 3: 32-bit support
 
 We aim to treat 32-bit and 64-bit similarly. With challenge 1 solved,
 we can do similarly to Go and reserve the address space progressively.
 This also addresses the problem in 64-bit for machines with more than
-1TB of RAM, and offers the choice of virtual pages smaller than 1TB if
-needed.
+1TB of RAM, and offers the choice of virtual spaces smaller than 1TB
+if needed.
 
-We set a prefix size N ≥ 8, and use a 1-level or 2-level virtual page
-table of size 2^N. For 64-bit this means virtual pages ≤1TB (for N =
+We set a prefix size N ≥ 8, and use a 1-level or 2-level virtual space
+table of size 2^N. For 64-bit this means virtual spaces ≤1TB (for N =
 16 this is 4GB, what the multicore GC reserves for the minor heap),
 and ≤16MB in 32-bit.
 
-While not necessary to demonstrate our approach, real-world lessons
-can be learnt from the Go allocator (see for instance
-https://github.com/golang/go/blob/master/src/runtime/malloc.go). It
-contains tricks to avoid the fragmentation of the address space,
-platform-specific corner cases, etc.
+While not necessary to demonstrate our approach initially, many
+real-world lessons can be learnt from the detailed sources of the Go
+allocator. In Go, the size is chosen to be 64MB or 4MB depending on
+the platform
+[(details)](https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L219-L231).
+Given the small sizes, special care is taken to reserve space as
+contiguously as possible. In 64-bit, one hints at a specific place in
+the middle of the address space unlikely to conflict with other
+mappings
+[(details)](https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L489-L498).
+In 32-bit one asks to start as low as possible and tries to reserve a
+large chunk initially
+[(details)](https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L549-L564).
+There are further details in
+[malloc.go](https://github.com/golang/go/blob/master/src/runtime/malloc.go),
+concerning more platforms than supported by OCaml.
 
 ## Challenge 4: malloc for multicore
 
@@ -121,16 +154,16 @@ For instance, jemalloc arenas can be customised to use the memory
 chunks one provides to it, e.g. carved out of the reserved address
 space (http://jemalloc.net/jemalloc.3.html#arena.i.extent_hooks).
 
-
 # Towards better systems programming in OCaml with out-of-heap allocation
 
 The current multicore OCaml implementation bans so-called “naked
-pointers”, pointers outside the OCaml heap unless they follow drastic
-restrictions. A backwards-incompatible change has been proposed to
-make way for the new multicore GC in OCaml. I argue that out-of-heap
-pointers are not an anomaly, but are part of a better systems
-programming future, and I propose to show that the address space
-reservation technique makes them compatible with the multicore GC.
+pointers”, pointers to outside the OCaml heap unless they follow
+drastic restrictions. A backwards-incompatible change has been
+proposed to make way for the new multicore GC in OCaml. I argue that
+out-of-heap pointers are not an anomaly, but are part of a better
+systems programming future, and I propose to show that the address
+space reservation technique makes them compatible with the multicore
+GC.
 
 This is inspired by @jhjourdan's experiment with a contiguous address
 space at <https://github.com/ocaml/ocaml/issues/6101>. Seven years
@@ -253,8 +286,8 @@ multi-threaded runtime for Julia reserves 100GB for thread stacks
 reserve 512GB up-front at some point, and now reserves more
 progressively.
 
-Go further uses virtual addressing tricks to support _derived
-pointers_: pointers to the inside of a block
+Go further uses virtual addressing tricks to support interior
+pointers: pointers to the inside of a block
 (https://blog.golang.org/ismmkeynote). The bitpattern is used to
 encode the size of the block and thus where it starts. (This technique
 would have an obvious use in complement to the unboxing proposal for
@@ -280,10 +313,10 @@ people who do not need compaction, and its experimental nature.)
 
 ### Backwards compatibility
 
-The transition to multicore requires to remove the (physical) page
-table. Replacing the page table by a reserved virtual memory range
-offers the possibility to avoid code breakage, and thus quicken the
-multicore transition.
+The transition to multicore requires to remove the page table.
+Replacing the page table by a reserved virtual memory range offers the
+possibility to avoid code breakage, and thus quicken the multicore
+transition.
 
 Indeed, backwards compatibility is a counter-intuitive topic. While
 little documentation is found in the literature, Malloy and Powers
@@ -601,9 +634,11 @@ however, seems to have been done in the right way from the beginning.)
 While this one is correct, this is a limitation of setrlimit which
 only offers to limit virtual memory, and not the resident set. The
 multicore concurrent collector, with the 4GB reserved space for minor
-heaps, already considered to give up on it. In addition, more advanced
-memory limits are provided by cgroups, and according to documentation
-they would work correctly.
+heaps, already considered to give up on it. Since Linux 4.7,
+allocation done with mmap are counted for the RLIMIT_DATA resource
+limit (see `malloc(3)`). In addition, more advanced memory limits are
+provided by cgroups, and according to documentation they would work
+correctly.
 
 ### One cannot use `mlock` to avoid swapping
 
