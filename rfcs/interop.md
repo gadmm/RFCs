@@ -61,9 +61,10 @@ that solves the problem independently of the context.
 >  — Then don't do it!”
 
 Current OCaml and OCaml multicore get memory chunks from the system
-allocator. Consequently, the risk that out-of-heap pointers integrate
-the heap after being freed is real. The GC will be confused and follow
-these out-of-heap pointers, leading to a crash.
+allocator. Consequently, the risk that out-of-heap pointers allocated
+by malloc become in-heap after the memory has been freed is real. The
+GC will be confused and follow these out-of-heap pointers, leading to
+a crash.
 
 In practice, the “growing heap” issue is less of a problem than it
 sounds, at least when using address space reservation. One must be
@@ -77,7 +78,8 @@ a few tricks, such as asking the programmer, who knows more about the
 context, to provide this assumption for them. It seems that the
 programmer can make a lot of deductions from the nature of the
 pointers they let inside the heap and the inner workings of their
-system's malloc implementation (e.g. [glibc malloc](https://sourceware.org/glibc/wiki/MallocInternals)).
+system's malloc implementation (e.g. [glibc
+malloc](https://sourceware.org/glibc/wiki/MallocInternals)).
 
 For instance, in the case of out-of-heap allocation for systems
 programming (ancient heap, shared heap, arena...), this is a complete
