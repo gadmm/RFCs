@@ -4,12 +4,13 @@ To efficiently recognise in-heap from off-heap pointers, the broad
 idea is to offer a small "virtual space table" of very large reserved
 address spaces. The address space is reserved as needed, similarly to
 what is done in the Go language
-(https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L77-L99).
+[(details)](https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L77-L99).
 
 The proposed implementation work is to demonstrate and implement a
 virtual space table for the non-multicore GC, starting from
-@jhjourdan's original approach of reserving a single contiguous
-virtual address space.
+Jacques-Henri Jourdan's original approach of reserving a single
+contiguous virtual address space at
+[#6101](https://github.com/ocaml/ocaml/issues/6101).
 
 The criterion is that performance must be comparable to the
 no-naked-pointers mode and not have extravagant adverse effect. This
@@ -55,9 +56,9 @@ that solves the problem independently of the context.
 
 ## Challenge 1: the “growing heap” issue
 
-    “Doctor, it hurts when I do this...
-
-    — Then don't do it!”
+> “Doctor, it hurts when I do this...
+>
+>  — Then don't do it!”
 
 Current OCaml and OCaml multicore get memory chunks from the system
 allocator. Consequently, the risk that out-of-heap pointers integrate
@@ -76,8 +77,7 @@ a few tricks, such as asking the programmer, who knows more about the
 context, to provide this assumption for them. It seems that the
 programmer can make a lot of deductions from the nature of the
 pointers they let inside the heap and the inner workings of their
-system's malloc implementation (e.g.
-https://sourceware.org/glibc/wiki/MallocInternals).
+system's malloc implementation (e.g. [glibc malloc](https://sourceware.org/glibc/wiki/MallocInternals)).
 
 For instance, in the case of out-of-heap allocation for systems
 programming (ancient heap, shared heap, arena...), this is a complete
@@ -152,7 +152,8 @@ allocator to manage large blocks. To avoid reimplementing a
 high-performance multithreaded allocator, one can reuse what exists.
 For instance, jemalloc arenas can be customised to use the memory
 chunks one provides to it, e.g. carved out of the reserved address
-space (http://jemalloc.net/jemalloc.3.html#arena.i.extent_hooks).
+space
+([arena.i.extent_hooks](http://jemalloc.net/jemalloc.3.html#arena.i.extent_hooks)).
 
 # Towards better systems programming in OCaml with out-of-heap allocation
 
