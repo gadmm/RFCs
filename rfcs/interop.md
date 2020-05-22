@@ -159,6 +159,11 @@ generalise this option, one can offer a runtime parameter where the
 user can select a fixed virtual address space size if needed (e.g. for
 32-bit).
 
+We expect that the programmer might make further deductiond and take
+further appropriate measures by studying the documentation of
+whichever malloc they use (e.g. for the [glibc
+malloc](https://sourceware.org/glibc/wiki/MallocInternals)).
+
 Making 2. part of the norm further offers the possibility of detecting
 such errors: when one sees a out-of-heap pointer during marking, one
 can “taint” the corresponding virtual space, and fail on a future
