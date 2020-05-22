@@ -19,11 +19,11 @@ is plausible thanks to the original experiment and the survey work.
 In addition, I have identified 4 challenges which must be convincingly
 shown solvable to ensure that the result is both usable and scalable:
 
-- the “growing heap” issue, whereby out-of-heap pointers become
+1. the “growing heap” issue, whereby out-of-heap pointers become
   in-heap after the heap grows,
-- 32-bit support,
-- the cost of synchronisation for multicore,
-- malloc implementation for multicore.
+2. 32-bit support,
+3. the cost of synchronisation for multicore,
+4. malloc implementation for multicore.
 
 ## Language reference
 
@@ -103,21 +103,7 @@ Tainting is not exact (an address range can become reserved before an
 out-of-heap pointer is seen by the GC), but serves to enforce 2. in
 practice.
 
-## Challenge 2: synchronisation
-
-Thanks to the rule 2. and the decision of never giving back address
-space to the OS, the virtual space table is monotonous: entries start
-with value Unknown and may become Reserved or Tainted at some point,
-and then no longer change.
-
-Tainting virtual spaces containing known out-of-heap pointers has a
-further interesting consequence: any read to the virtual space table
-sets the value: if the query for some pointer reads Unknown, one can
-immediately set it to Tainted. Thus any synchronisation needs to
-happen at most once per entry and per domain, and does not need subtle
-tricks.
-
-## Challenge 3: 32-bit support
+## Challenge 2: 32-bit support
 
 We aim to treat 32-bit and 64-bit similarly. With challenge 1 solved,
 we can do similarly to Go and reserve the address space progressively.
@@ -146,6 +132,20 @@ large chunk initially
 There are further details in
 [malloc.go](https://github.com/golang/go/blob/master/src/runtime/malloc.go),
 concerning more platforms than supported by OCaml.
+
+## Challenge 3: synchronisation
+
+Thanks to the rule 2. and the decision of never giving back address
+space to the OS, the virtual space table is monotonous: entries start
+with value Unknown and may become Reserved or Tainted at some point,
+and then no longer change.
+
+Tainting virtual spaces containing known out-of-heap pointers has a
+further interesting consequence: any read to the virtual space table
+sets the value: if the query for some pointer reads Unknown, one can
+immediately set it to Tainted. Thus any synchronisation needs to
+happen at most once per entry and per domain, and does not need subtle
+tricks.
 
 ## Challenge 4: malloc for multicore
 
