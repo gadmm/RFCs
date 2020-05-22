@@ -77,9 +77,7 @@ To convert plausibility into certainty, the language designer can use
 a few tricks, such as asking the programmer, who knows more about the
 context, to provide this assumption for them. It seems that the
 programmer can make a lot of deductions from the nature of the
-pointers they let inside the heap and the inner workings of their
-system's malloc implementation (e.g. [glibc
-malloc](https://sourceware.org/glibc/wiki/MallocInternals)).
+pointers they let inside the heap.
 
 For instance, in the case of out-of-heap allocation for systems
 programming (ancient heap, shared heap, arena...), this is a complete
