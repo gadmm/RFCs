@@ -1,13 +1,13 @@
 # Efficient out-of-heap pointer detection
 
 To efficiently recognise in-heap from off-heap pointers, the broad
-idea is to offer a small "virtual space table" of very large reserved
+idea is to offer a small *address space map* of very large reserved
 address spaces. The address space is reserved as needed, similarly to
 what is done in the Go language
 [(details)](https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L77-L99).
 
-The proposed implementation work is to demonstrate and implement a
-virtual space table for the non-multicore GC, starting from
+The proposed implementation work is to demonstrate and implement aa
+address space map for the non-multicore GC, starting from
 Jacques-Henri Jourdan's original approach of reserving a single
 contiguous virtual address space at
 [#6101](https://github.com/ocaml/ocaml/issues/6101).
@@ -109,10 +109,10 @@ This also addresses the problem in 64-bit for machines with more than
 1TB of RAM, and offers the choice of virtual spaces smaller than 1TB
 if needed.
 
-We set a prefix size N ≥ 8, and use a 1-level or 2-level virtual space
-table of size 2^N. For 64-bit this means virtual spaces ≤1TB (for N =
-16 this is 4GB, what the multicore GC reserves for the minor heap),
-and ≤16MB in 32-bit.
+We set a prefix size N ≥ 8, and use a 1-level or 2-level array of size
+2^N. For 64-bit this means virtual spaces ≤1TB (for N = 16 this is
+4GB, what the multicore GC reserves for the minor heap), and ≤16MB in
+32-bit.
 
 While not necessary to demonstrate our approach initially, many
 real-world lessons can be learnt from the detailed sources of the Go
@@ -134,7 +134,7 @@ concerning more platforms than supported by OCaml.
 ## Challenge 3: synchronisation
 
 Thanks to the rule 2. and the decision of never giving back address
-space to the OS, the virtual space table is monotonous: entries start
+space to the OS, the address space map is monotonous: entries start
 with value Unknown and may become Reserved or Tainted at some point,
 and then no longer change.
 
@@ -352,7 +352,8 @@ debuggers, static analysers and such, in ways that are unlikely to be
 fixable over time. Moreover, they do not bring additional safety in
 terms of resource-management: what they do is to deal in a rather
 radical manner with the problem of growing the heap while remembering
-who was outside.
+who was outside (an issue that can also be solved by virtual
+addressing techniques).
 
 I asked @jberdine, who works at a large industrial OCaml user, if he
 had any migration concerns. I quote his reply with his permission (I
