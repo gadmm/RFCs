@@ -63,16 +63,18 @@ multicore_ by avoiding the breaking changes brought by the removal of
 the page table, if we come to a conclusion on the proposed design
 early enough. So please help us determine where the bar is placed.
 
+# Part 1
+
 # Efficient out-of-heap pointer detection
 
 To efficiently recognise in-heap from off-heap pointers, the broad
-idea is to offer a small *address space map* of very large reserved
-address spaces. The address space is reserved as needed, similarly to
+idea is to offer a small *virtual space map* of very large reserved
+virtual spaces. The virtual space is reserved as needed, similarly to
 what is done in the Go language
 [(details)](https://github.com/golang/go/blob/9acdc705e7d53a59b8418dd0beb570db35f7a744/src/runtime/malloc.go#L77-L99).
 
-The proposed implementation work is to demonstrate and implement an
-address space map for the non-multicore GC, starting from
+The proposed implementation work is to demonstrate and implement a
+virtual space map for the non-multicore GC, starting from
 Jacques-Henri Jourdan's original approach of reserving a single
 contiguous virtual address space at
 [#6101](https://github.com/ocaml/ocaml/issues/6101).
@@ -136,8 +138,8 @@ In practice, the “growing heap” issue is less of a problem than it
 sounds, at least when using address space reservation. One must be
 “very unlucky” if a full huge mappable address range becomes entirely
 available (unreserved) after some memory was allocated inside of it,
-at a location close to where we choose to extend the address space
-next.
+at a location close to where we choose to extend the reserved address
+space next.
 
 To convert plausibility into certainty, the language designer can use
 a few tricks, such as asking the programmer, who knows more about the
@@ -167,7 +169,7 @@ malloc](https://sourceware.org/glibc/wiki/MallocInternals)).
 Making 2. part of the norm further offers the possibility of detecting
 such errors: when one sees a out-of-heap pointer during marking, one
 can “taint” the corresponding virtual space, and fail on a future
-address space reservation if one cannot obtain an untainted range.
+virtual space reservation if one cannot obtain an untainted range.
 Tainting is not exact (an address range can become reserved before an
 out-of-heap pointer is seen by the GC), but serves to enforce 2. in
 practice.
@@ -180,26 +182,26 @@ This also addresses the problem in 64-bit for machines with more than
 1TB of RAM, and offers the choice of virtual spaces smaller than 1TB
 if needed.
 
-We set a prefix size N ≥ 8. The runtime can reserve up to 2^N virtual
-spaces, of size 2^L bytes (L=48-N in 64-bit and L=32-N in 32-bit),
-aligned at 2^L. For 64-bit this means virtual spaces ≤1TB (for N = 16
-this is 4GB, what the multicore GC reserves for the minor heap), and
-≤16MB in 32-bit. We use a global 1-level or 2-level array of size (at
-most) 2^N bytes as the address space map, so that finding the status
-of the virtual space a pointer belongs to is done efficiently by
-shifting and looking up in the array.
+We set a prefix size N ≥ 8. We assume the runtime can reserve up to
+2^N virtual spaces, of size 2^L bytes (L=48-N in 64-bit and L=32-N in
+32-bit), aligned at 2^L. For 64-bit this means virtual spaces ≤1TB
+(for N = 16 this is 4GB, what the multicore GC reserves for the minor
+heap), and ≤16MB in 32-bit. We use a global 1-level or 2-level array
+of size (at most) 2^N bytes as the virtual space map, so that finding
+the status of the virtual space a pointer belongs to is done
+efficiently by shifting and looking up in the array.
 
-We consider 3 possible states for each space in the address space map:
+We consider 3 possible states for each space in the virtual space map:
 Unknown, Reserved, Tainted. Thanks to the assumption 2. provided by
-the programmer and the decision to never give back address space to
+the programmer and the decision to never give back virtual spaces to
 the OS, this state is monotonous: entries start with value Unknown and
 may become Reserved or Tainted at some point, and no longer change.
 
 When a major allocation requires to reserve additional contiguous
-address spaces, such a reservation (aligned at 2^L, of size a multiple
+virtual spaces, such a reservation (aligned at 2^L, of size a multiple
 of 2^L) is requested to the OS. A hint can be given as to where we
 would like it to start. The given mapping is checked against the
-address space map: none must be Tainted. In case of success, the
+virtual space map: none must be Tainted. In case of success, the
 corresponding virtual spaces are marked as Reserved in the map, and in
 case of failure then the rule 2. has been violated and the allocation
 fails.
@@ -223,11 +225,11 @@ concerning more platforms than supported by OCaml.
 
 ## Challenge 3: synchronisation
 
-As we explained, when a query to the address space map gives Unknown,
+As we explained, when a query to the virtual space map gives Unknown,
 then we know we have an out-of-heap pointer, and we set it the entry
 to Tainted. Thus, tainting virtual spaces has a further interesting
 consequence: the value of the entry is permanently set to Reserved or
-Tainted as early as after the first query against the address space
+Tainted as early as after the first query against the virtual space
 map. This gives a simple synchronisation strategy in multicore.
 
 We give each domain a local map that caches the global map. Then,
@@ -243,7 +245,8 @@ Furthermore, when extending the reserved space during an allocation,
 one needs to be able to atomically compare and set several adjacent
 entries. One then can use a mutex, since it only competes with (other
 extensions of the reserved space and) queries of Unknown entries in
-the global table, which happen at most 2^N times globally.
+the global table. In the latter case we need to acquire the mutex as
+well, which happens at most 2^N times globally.
 
 ## Challenge 4: malloc for multicore
 
@@ -254,6 +257,8 @@ For instance, jemalloc arenas can be customised to use the memory
 chunks one provides to it, e.g. carved out of the reserved address
 space
 ([arena.i.extent_hooks](http://jemalloc.net/jemalloc.3.html#arena.i.extent_hooks)).
+
+# Part 2
 
 ## Gathered evidence from the practice and the literature
 
@@ -369,8 +374,9 @@ languages, even if they are believed to be minor.
 It has been argued that code using foreign pointers could be adapted
 in various ways:
 
-- With an indirection: use custom or abstract blocks.
-- Tag pointers: disguise pointers as integers by setting the lsb.
+- With an indirection: use blocks with special tag *Custom* or
+  *Abstract*.
+- Tagging pointers: disguise pointers as integers by setting the lsb.
 
 In addition to explicitly breaking existing code, as we have seen in
 the case of foreign pointers, none of the propositions is ideal: in
@@ -514,16 +520,17 @@ implemented.
 A minor allocation risks incurring a stop roughly proportional to the
 amount of promoted objects if it triggers a minor collection or a
 major slice, frequently between 2ms and 10ms. The low latency of the
-other allocation methods has the potential to drastically augment the
-expressiveness of the special low-latency dialect of OCaml currently
-in use, where one tries to promote very little.
+other allocation methods would drastically augment the expressiveness
+of the special low-latency dialect of OCaml currently in use, where
+one tries to promote very little.
 
 In 1998, Mark Hayden's PhD thesis about the Ensemble system
 (https://ecommons.cornell.edu/handle/1813/7316) found that
 bump-pointer allocation using reusable off-heap arenas managed with
 reference-counting was a solution to get (otherwise impossible)
-reliable low latencies for buffer management in networking in OCaml. I
-would like to make such usage first-class in OCaml.
+reliable low latencies for buffer management in networking in OCaml.
+One goal is to make such usage first-class in OCaml for structured
+data.
 
 Augmenting the low-latency capabilities of OCaml is one of the goals
 to achieve better suitability as a systems programming language.
@@ -669,18 +676,18 @@ straightforward with calls to `VirtualAlloc` with options
 
 This technique was probably not as well documented and crowd-sourced
 until recent years, and for similar reasons probably, we found aspects
-which could be improved in the prototype from 7 years ago at
+which could be improved over the prototype from 7 years ago at
 ocaml/ocaml#6101 (superfluous use of MAP_NORESERVE, usage of `mmap`
 instead of `mprotect`). (The implementation from OCaml multicore,
 however, seems to have been done in the right way from the beginning.)
 
-### One cannot use setrlimit with RLIMIT_AS to limit memory
+### One cannot use setrlimit with `RLIMIT_AS` to limit memory
 
 While this one is correct, this is a limitation of setrlimit which
 only offers to limit virtual memory, and not the resident set. The
 multicore concurrent collector, with the 4GB reserved space for minor
 heaps, already considered to give up on it. Since Linux 4.7,
-allocation done with mmap are counted for the RLIMIT_DATA resource
+allocations done with mmap are counted for the `RLIMIT_DATA` resource
 limit (see `malloc(3)`). In addition, more advanced memory limits are
 provided by cgroups, and according to documentation they would work
 correctly.
@@ -717,7 +724,9 @@ mapping we can ensure that reclamation only happens during calls to
 `Gc.compact()` or another appropriate moment if we want. The current
 allocator design for multicore defers to the system allocator for
 large allocations, and as far as I understand does not offer similar
-control.
+control. But this is purely theoretical, since if this starts to
+matter, then OCaml will really have succeded in offering decent low
+latency.
 
 ## Thanks
 
