@@ -311,10 +311,11 @@ in OCaml in the wild.
 
 At #9534 and #9535, without questioning the no-naked-pointers
 approach, library developers still reported the convenience of
-allowing a special NULL pointer value for interoperability (and other
+allowing a special NULL pointer value for bindings (and other
 purposes). @xavierleroy commented: “we were hoping to get rid of those
 code paths when naked pointers are disallowed, but with this PR the
-special path is back, just to handle Obj.null.”
+special path is back, just to handle Obj.null.” It was eventually
+concluded that existing examples could be rephrased.
 
 ### Address space reservation
 
@@ -618,7 +619,7 @@ is it with other known alternatives: marshalling, or memory layouts
 that would determine the allocation method statically à la “kinds as
 calling conventions” (Eisenberg and Peyton Jones).
 
-In “Resource Polymorphism”, I proposed a high-level interpretation of
+In “Resource Polymorphism”*, I proposed a high-level interpretation of
 this kind of interoperability between allocation methods, using an
 ownership and borrowing model inspired from a categorical semantics.
 In this model, the borrowing type operator (&) is interpreted as a
@@ -652,6 +653,11 @@ safe.
 Of course, these investigations, prospective by nature, are beyond the
 scope of this RFC. But they serve to demonstrate the community's
 motivation in pursuing these goals.
+
+(*: the paper mentions using the lsb as a pointer tag, but this
+approach would require to emit a masking instruction to realign the
+pointer before every access, which we do not see as a realistic
+approach for OCaml.)
 
 ## Dispelling common misconceptions
 
